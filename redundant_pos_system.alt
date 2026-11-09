@@ -1,0 +1,107 @@
+domain Signal	{OK, 		ERR, 	 	LOSS}
+//domain State 	{WORKING, 	DEGRADED, 	FAILED} // why not just Working/failed? For MEMS and FCC hardware failures, this seems to be better.
+
+
+class Pos_sensor // this is effectively a signal generator.
+	Signal pos_signal (init = OK);
+	event fail_err   (delay= exponential(lambda_err));
+	event fail_loss  (delay= exponential(lambda_loss));
+
+	parameter Real lambda_err 		= 1.0e-5;
+	parameter Real lambda_loss 	= 1.0e-4;
+
+	transition 
+		fail_err:   pos_signal==OK  -> pos_signal := ERR;
+		fail_loss:  pos_signal==OK  -> pos_signal := LOSS;
+end
+
+class Filter
+	Signal output_filter   (reset= OK);
+	Signal in_IMU  			(reset= OK);
+	Signal in_GNSS 			(reset= OK);
+
+	assertion
+        output_filter := switch {
+            case in_IMU == OK   and in_GNSS == OK   : OK
+            case in_IMU == ERR  and in_GNSS == OK   : ERR
+            case in_IMU == LOSS and in_GNSS == OK   : ERR
+            case in_IMU == OK   and in_GNSS == ERR  : ERR
+            case in_IMU == ERR  and in_GNSS == ERR  : ERR
+            case in_IMU == LOSS and in_GNSS == ERR  : ERR
+            case in_IMU == OK   and in_GNSS == LOSS : ERR
+            case in_IMU == ERR  and in_GNSS == LOSS : ERR
+            case in_IMU == LOSS and in_GNSS == LOSS : LOSS
+            default                             	   : LOSS
+        };
+end
+
+class Comparer
+	Signal in_1 (reset= OK);
+	Signal in_2 (reset= OK);
+	Signal in_3 (reset= OK);
+	Signal output  (reset= OK);
+
+	assertion
+        output :=  switch {
+			case in_1 == LOSS or in_2 == LOSS or in_3 == LOSS : LOSS
+         	case in_1 == OK and in_2 == OK   					: OK
+           	case in_2 == OK and in_3 == OK   					: OK
+           	case in_3 == OK and in_1 == OK   					: OK
+           	default                             	   			: ERR
+        };
+end
+
+class FCC
+	Signal _state (init = OK); // assume that _state is an internal variable for the FCC. It does not go through to the rest of the system.
+	Signal in_pos_state (reset = OK); // the pos_signal is a flow variable.
+	Signal out_pos_state (reset = OK); // the pos_signal is a flow variable.
+
+	event failure_h (delay= exponential(lambda_h));
+	parameter Real lambda_h = 1.0e-3; // lambda_h for "hardware" failure
+
+	transition
+		failure_h: _state==OK -> _state := LOSS;
+	assertion
+		out_pos_state := if _state == OK then in_pos_state
+							else LOSS;
+end
+
+
+block Positioning_system_redundant
+// instances of positioning system
+//components
+  Pos_sensor IMU1(lambda_err=1.0e-5, lambda_loss=1.0e-4);
+  Pos_sensor GNSS1(lambda_err=1.0e-5, lambda_loss=1.0e-4);
+  Filter     Kalman1;
+
+ Pos_sensor IMU2(lambda_err=1.0e-5, lambda_loss=1.0e-4);
+  Pos_sensor GNSS2(lambda_err=1.0e-5, lambda_loss=1.0e-4);
+  Filter     Kalman2;
+
+ Pos_sensor IMU3(lambda_err=1.0e-5, lambda_loss=1.0e-4);
+  Pos_sensor GNSS3(lambda_err=1.0e-5, lambda_loss=1.0e-4);
+  Filter     Kalman3;
+
+  Comparer   comp;
+  FCC        PosSysComp(lambda_h=1.0e-5);
+
+  assertion
+	Kalman1.in_IMU  			:= IMU1.pos_signal;
+	Kalman1.in_GNSS				:= GNSS1.pos_signal;
+
+	Kalman2.in_IMU  			:= IMU2.pos_signal;
+	Kalman2.in_GNSS				:= GNSS2.pos_signal;
+
+	Kalman3.in_IMU  			:= IMU3.pos_signal;
+	Kalman3.in_GNSS				:= GNSS3.pos_signal;
+
+	comp.in_1 					:= Kalman1.output_filter;
+	comp.in_2 					:= Kalman2.output_filter;
+	comp.in_3 					:= Kalman3.output_filter;
+	
+	PosSysComp.in_pos_state 	:= comp.output;
+
+observer Boolean pos_sys_fail = (PosSysComp.out_pos_state == LOSS);
+observer Boolean pos_sys_err  = (PosSysComp.out_pos_state == ERR);
+
+end
